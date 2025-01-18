@@ -3,7 +3,7 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/md5"
 	"database/sql"
 	"encoding/binary"
@@ -11,16 +11,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
 	"os"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/shared"
 )
 
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 var (
 	dbPath  string
@@ -153,42 +155,30 @@ func cacheEmbedding(hash string, modelID int, embedding []float32) {
 	}
 }
 
-func getOpenAIEmbedding(model, text string) ([]float32, error) {
-	requestBody, err := json.Marshal(EmbeddingRequest{
-		Model: model,
-		Input: text,
+func getOpenAIEmbedding(model, input string) ([]float32, error) {
+	client := openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL(apiURL),
+	)
+
+	response, err := client.Embeddings.New(context.TODO(), openai.EmbeddingNewParams{
+		Model:          openai.F(model),
+		Input:          openai.F[openai.EmbeddingNewParamsInputUnion](shared.UnionString(input)),
+		EncodingFormat: openai.F(openai.EmbeddingNewParamsEncodingFormatFloat),
 	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal OpenAI request: %v", err)
+		return nil, fmt.Errorf("failed to create embeddings: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", apiURL+"embeddings", bytes.NewBuffer(requestBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OpenAI request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	var output []float32
+	for _, embedding := range response.Data {
+		for _, value := range embedding.Embedding {
+			output = append(output, float32(value))
+		}
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send OpenAI request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("OpenAI API error: %s", string(body))
-	}
-
-	var openAIResponse EmbeddingResponse
-	if err := json.NewDecoder(resp.Body).Decode(&openAIResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode OpenAI response: %v", err)
-	}
-
-	return openAIResponse.Embedding, nil
+	return output, nil
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
