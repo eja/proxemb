@@ -22,7 +22,7 @@ import (
 	"github.com/openai/openai-go/shared"
 )
 
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 var (
 	dbPath  string
@@ -41,7 +41,17 @@ type EmbeddingRequest struct {
 }
 
 type EmbeddingResponse struct {
-	Embedding []float32 `json:"embedding"`
+	Object string `json:"object"`
+	Data   []struct {
+		Object    string    `json:"object"`
+		Embedding []float32 `json:"embedding"`
+		Index     int       `json:"index"`
+	} `json:"data"`
+	Model string `json:"model"`
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 func initDB() {
@@ -192,20 +202,39 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	modelID := getModelID(req.Model)
 	hash := getHash(req.Input)
 
-	if embedding, exists := getCachedEmbedding(hash, modelID); exists {
-		json.NewEncoder(w).Encode(EmbeddingResponse{Embedding: embedding})
-		return
+	var embedding []float32
+	var exists bool
+
+	if embedding, exists = getCachedEmbedding(hash, modelID); !exists {
+		var err error
+		embedding, err = getOpenAIEmbedding(req.Model, req.Input)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get embeddings: %v", err), http.StatusInternalServerError)
+			return
+		}
+		cacheEmbedding(hash, modelID, embedding)
 	}
 
-	embedding, err := getOpenAIEmbedding(req.Model, req.Input)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get embeddings: %v", err), http.StatusInternalServerError)
-		return
+	response := EmbeddingResponse{
+		Object: "list",
+		Data: []struct {
+			Object    string    `json:"object"`
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		}{
+			{
+				Object:    "embedding",
+				Embedding: embedding,
+				Index:     0,
+			},
+		},
+		Model: req.Model,
 	}
 
-	cacheEmbedding(hash, modelID, embedding)
-
-	json.NewEncoder(w).Encode(EmbeddingResponse{Embedding: embedding})
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
+	}
 }
 
 func main() {
